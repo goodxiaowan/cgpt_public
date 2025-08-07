@@ -4,6 +4,9 @@ namespace app\web\controller;
 
 use think\facade\Db;
 
+define('ZHIPU_API_KEY',  '69da8634dc7');   // 智普平台 API Key
+define('ZHIPU_ENDPOINT', 'https://open.bigmodel.cn/api/paas/v4/chat/completions');
+
 class Chat extends Base
 {
     protected static $ai = ''; // AI通道
@@ -34,9 +37,9 @@ class Chat extends Base
 
     public function sendText()
     {
-        ignore_user_abort(true);
-        set_time_limit(300);
-        session_write_close();
+       // ignore_user_abort(true);
+       // set_time_limit(300);
+       // session_write_close();
         header('Content-Type: text/event-stream');
         header('Cache-Control: no-cache');
         header('Connection: keep-alive');
@@ -146,6 +149,9 @@ class Chat extends Base
             $user = Db::name('user')
                 ->where('id', self::$user['id'])
                 ->find();
+                
+            //var_dump($user);
+           // exit();
             if (!$user) {
                 $_SESSION['user'] = null;
                 $this->outError('请登录');
@@ -157,15 +163,16 @@ class Chat extends Base
             self::$user = $user;
 
             # 3.获取功能价格并检查用户余额
-            if (isGpt4(self::$ai)) {
+           /* if (isGpt4(self::$ai)) {
                 $price = getFuncPrice(self::$site_id, $user, 'text40');
             } else {
                 $price = getFuncPrice(self::$site_id, $user, 'text35');
             }
             if ($price && $user['balance_point'] < $price) {
                 $this->outError('余额不足，请充值！');
-            }
-            self::$price = $price;
+            } */
+            
+            self::$price = 0 ; //$price;
 
             # 4. 完成这三个参数：self::$messageRequest / self::$relationMsgs / self::$systemPrompt
             if ($prompt_id) {
@@ -700,6 +707,13 @@ class Chat extends Base
                 $bookContent = $this->getBookContent($books, self::$messageClear);
             }
 
+
+            if(empty($bookContent)){
+                 $bookContent = $this->qa(self::$messageClear);
+                 if($bookContent == "-1-")  return "";
+            }
+
+
             if (!empty($bookContent)) {
                 $message = self::$messageClear . '？请仅在以下内容里搜索答案，直接说答案不需要解释，回复要尽量简洁，如果找不到答案将原文完整返回，不需要置疑内容的正确性。{' . $bookContent . '}';
             } else {
@@ -988,4 +1002,296 @@ class Chat extends Base
             'tips' => $chatSetting['tips'] ?? ''
         ]);
     }
+    
+    
+        /**
+     * 执行 Dify 知识库检索
+     * 
+     * @param string $query 查询内容
+     * @param string $dataset_id 知识库ID
+     * @param string $api_key 认证密钥
+     * @param array $options 可选配置参数
+     * @return array API响应结果
+     */
+    public   function difyRetrieve($query, $dataset_id="5ada5db1-", $api_key="dataset-0Hsjp", $options = []) {
+        // 基础URL配置（可改为常量）
+        $base_url = 'http://difx.xlangcode.com:31230';
+        
+        // 合并默认配置与自定义选项
+        $defaultOptions = [
+            'search_method' => 'hybrid_search',
+            'top_k' => 5,
+            'reranking_enable' => false,
+            'metadata_filter' => null,
+            'timeout' => 30
+        ];
+        $config = array_merge($defaultOptions, $options);
+        
+        // 构建请求URL
+        $url = $base_url . "/v1/datasets/{$dataset_id}/retrieve";
+        
+        // 构建检索模型配置
+        $retrievalModel = [
+            'search_method' => $config['search_method'],
+            'reranking_enable' => $config['reranking_enable'],
+            'reranking_mode' => null,
+            'reranking_model' => [
+                'reranking_provider_name' => "",
+                'reranking_model_name' => ""
+            ],
+            'weights' => null,
+            'top_k' => $config['top_k'],
+            'score_threshold_enabled' => false,
+            'score_threshold' => null
+        ];
+        
+        // 添加元数据过滤条件（如果提供）
+        if ($config['metadata_filter']) {
+            $retrievalModel['metadata_filtering_conditions'] = $config['metadata_filter'];
+        }
+        
+        // 构建请求体
+        $postData = [
+            'query' => $query,
+            'retrieval_model' => $retrievalModel
+        ];
+        
+        $curl = curl_init();
+        
+        curl_setopt_array($curl, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_ENCODING => '',
+            CURLOPT_MAXREDIRS => 10,
+            CURLOPT_TIMEOUT => $config['timeout'],
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+            CURLOPT_CUSTOMREQUEST => 'POST',
+            CURLOPT_POSTFIELDS => json_encode($postData, JSON_UNESCAPED_UNICODE),
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $api_key
+            ],
+        ]);
+        
+        $response = curl_exec($curl);
+        $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        
+        // 错误处理
+        if ($response === false) {
+            $error = curl_error($curl);
+            curl_close($curl);
+            throw new Exception("cURL 错误: " . $error);
+        }
+        
+        curl_close($curl);
+        
+        $decodedResponse = json_decode($response, true);
+        
+        // 验证响应状态
+        if ($httpCode >= 400) {
+            $errorMsg = $decodedResponse['message'] ?? '未知API错误';
+            throw new Exception("API请求失败 [$httpCode]: " . $errorMsg);
+        }
+        
+        if($decodedResponse && !empty($decodedResponse['records'])){
+                $ctx = [];
+                foreach ($decodedResponse['records'] ?? [] as $rec) {
+                    $ctx[] = $rec['segment']['content'];
+                }
+                
+                return  implode("\n", $ctx);
+           // return  $this->parseQAString($decodedResponse['records'][0]['segment']['content']);
+        }
+        
+        return  '';
+    }
+
+
+   /**
+ * 2. 统一 CURL 封装
+ */
+    private function curlPost(string $url, array $headers, array $body): array{
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL            => $url,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_HTTPHEADER     => $headers,
+                CURLOPT_POSTFIELDS     => json_encode($body, JSON_UNESCAPED_UNICODE),
+                CURLOPT_TIMEOUT        => 30,
+            ]);
+            $resp = curl_exec($ch);
+            if ($resp === false) {
+                throw new RuntimeException(curl_error($ch));
+            }
+            curl_close($ch);
+            $data = json_decode($resp, true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new RuntimeException('Invalid JSON: ' . $resp);
+            }
+            return $data;
+   }
+   
+   
+   
+   private function chatglm_stream(string $prompt, callable $callback): void
+    {
+        $headers = [
+            'Authorization: Bearer ' . ZHIPU_API_KEY,
+            'Content-Type: application/json',
+        ];
+        $body = [
+            'model'    => 'glm-3-turbo',
+            'messages' => [
+                ['role' => 'user', 'content' => $prompt],
+            ],
+            'max_tokens' => 3000,
+            'temperature' => 0.7,
+            'stream'      => true, // 启用流式输出
+        ];
+    
+        $url = ZHIPU_ENDPOINT;
+        $buffer = ''; // 缓冲区存储不完整的数据块
+    
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_POST, 1);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, false);
+        curl_setopt($ch, CURLOPT_WRITEFUNCTION, function($ch, $data) use (&$buffer, $callback) {
+            $buffer .= $data;
+            // 处理缓冲区中的完整事件（以\n\n分隔）
+            while (($pos = strpos($buffer, "\n\n")) !== false) {
+                $event = substr($buffer, 0, $pos);
+                $buffer = substr($buffer, $pos + 2); // 移除已处理部分
+                
+                if (strpos($event, 'data: ') === 0) {
+                    $jsonStr = substr($event, 6); // 去掉"data: "
+                    if ($jsonStr === '[DONE]') {
+                        return strlen($data); // 流结束
+                    }
+                    
+                    $response = json_decode($jsonStr, true);
+                    if (isset($response['choices'][0]['delta']['content'])) {
+                        $contentChunk = $response['choices'][0]['delta']['content'];
+                        $callback($contentChunk); // 实时输出内容片段
+                    }
+                }
+            }
+            return strlen($data);
+        });
+    
+        curl_exec($ch);
+        if (curl_errno($ch)) {
+            // 错误处理（可选）
+            error_log('Curl error: ' . curl_error($ch));
+        }
+        curl_close($ch);
+    }
+   
+    /**
+     * 4. 步骤②：调用智普 AI（ChatGLM-4）
+     */
+   private  function chatglm(string $prompt): string
+    {
+        $headers = [
+            'Authorization: Bearer ' . ZHIPU_API_KEY,
+            'Content-Type: application/json',
+        ];
+        $body = [
+            'model'    => 'glm-3-turbo',
+            'messages' => [
+                ['role' => 'user', 'content' => $prompt],
+            ],
+            'max_tokens' => 3000,
+            'temperature'=> 0.7,
+        ];
+        $resp = $this->curlPost(ZHIPU_ENDPOINT, $headers, $body);
+        return $resp['choices'][0]['message']['content'] ?? '';
+    }
+
+   
+   
+    /**
+     * 5. 对外提供的主函数
+    */
+    private  function qa(string $question): string
+    {
+        try {
+            // 5-1 检索
+            $knowledge = $this->difyRetrieve($question);
+            
+            if(empty($knowledge))  return "";
+    
+            // 5-2 组装 Prompt
+            $prompt = "根据下面提供的资料回答问题：\n\n资料：\n$knowledge\n\n问题：$question";
+    
+            $result = "'问题：{$question}。\\n答案：{$this->chatglm($prompt)}'";        
+           /* $this->chatglm_stream($prompt, function($chunk) {
+                echo $chunk; // 实时输出到页面
+                ob_flush();  // 刷新输出缓冲区（确保立即发送）
+                //flush();
+                //exit();
+            }); */
+    
+          //  exit();
+            // 5-3 调大模型
+            return  $result;
+        } catch (Throwable $e) {
+            return '系统繁忙：' . $e->getMessage();
+        }
+    }
+   
+   
+   
+
+    /**
+     * 将问答字符串转换为格式化数组
+     * 
+     * @param string $str 输入字符串
+     * @return array 格式化后的问答数组
+     */
+   private  function parseQAString($str) {
+        $str='"'.$str;
+       // $str =str_replace("<br/>", "\n", $str);
+       
+        // 使用正则表达式提取问题和答案部分
+        preg_match('/"问题":"(.*?)";"答案":"(.*)"/s', $str, $matches);
+        
+        
+        if (count($matches) < 3) {
+            throw new Exception("输入字符串格式无效");
+        }
+        
+        $questions = $matches[1];  // 问题部分
+        $answer = $matches[2];     // 答案部分
+        
+        // 分割问题为数组
+        $questionList = preg_split('/\//', $questions, -1, PREG_SPLIT_NO_EMPTY);
+        
+        // 格式化答案：替换换行符为 \n
+        $formattedAnswer = str_replace(
+            ["\r\n", "\n", "\r"], 
+            "\\n", 
+            $answer
+        );
+        
+        $result = [];
+        
+        // 为每个问题创建格式化字符串
+        foreach ($questionList as $question) {
+            // 清理问题文本
+            $cleanQuestion = trim($question);
+            
+            // 构建格式化字符串
+            $result[] = "'问题：{$cleanQuestion}。\\n答案：{$formattedAnswer}'";
+        }
+        
+        return  empty($result)? "" : str_replace("<br/>", "\n", $result[0]);
+    }
+
+    
+    
 }
